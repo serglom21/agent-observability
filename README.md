@@ -67,23 +67,21 @@ The config to run is `collector/otelcol.customer.yaml`. It does not write a file
 
    Leave `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, and `OTEL_LOG_TOOL_CONTENT` unset unless you want the log attributes in the next section. `run_native.py --content` sets all three.
 
-5. In Sentry, open Traces and the new trace, or open Agents > Conversations and follow a trace link from the row's "2 traces". Give the index half a minute. The picture is that interaction trace, the whole tree. The root is `gen_ai.invoke_agent` at 1.12min. Under it are `gen_ai.chat` and `gen_ai.execute_tool`, and each tool still has its short `tool.execution` and `tool.blocked_on_user` children. The page header is 0 issues, 34 spans, root duration 1.12min, 25 logs.
+5. In Sentry, open Traces and the new trace, or open Agents > Conversations and follow a trace link from the row. Give the index half a minute. The picture is that interaction trace, the whole tree, from a content-off run through `collector/otelcol.customer.yaml`. The header is 0 issues, 12 spans, root duration 40.81s, and 18 logs. The root is `gen_ai.invoke_agent`. Under it are `gen_ai.chat` and `gen_ai.execute_tool`. The customer config drops `tool.execution` and `tool.blocked_on_user`, so those children are not in the tree.
 
-![Interaction trace for the clean live collector run. Header: 0 issues, 34 spans, root duration 1.12min, 25 logs.](screenshots/collector-trace.png)
+![Interaction trace from the customer collector config. Content flags off. 0 issues, 12 spans, root duration 40.81s, 18 logs. The tree is invoke_agent, chat, and execute_tool only.](screenshots/collector-trace.png)
 
 ### What you see, and what you don't
 
-The conversation transcript is metadata. Names, durations, token counts, and Sentry's price are on the page. The prompt and the assistant text stay `<not reported>`. Tool rows stay `0 B`. The banner says the inputs and outputs weren't captured. The picture is that content-off run: 7 LLM calls, 0 errors, 113K, $0.159, two traces. The second trace is Haiku. It shares the conversation id, so the page counts it. For a transcript with the real prompt and the assistant text, use Option B.
+With the collector, the conversation transcript does not carry the prompt, the assistant text, or the tool bodies. Those stay `<not reported>`, and tool rows stay `0 B`. For a transcript with the real prompt and the assistant text, use Option B.
 
-![Clean live collector run. The header shows 7 LLM calls, 0 errors, 113K tokens, and $0.159.](screenshots/collector-conversation.png)
+Tool arguments are not on those spans. With `OTEL_LOG_TOOL_DETAILS=1` and `OTEL_LOG_TOOL_CONTENT=1` (`run_native.py --content` sets both, plus `OTEL_LOG_USER_PROMPTS`), the argument JSON is on the logs for that trace: `tool_parameters` on `claude_code.tool_decision`, and `tool_input` on `claude_code.tool_result`. The conversation page still does not render them. The picture is the log table for a content-on run through the same customer config, with one `claude_code.tool_result` open. `tool_input` is expanded and shows `limit`, `organizationSlug`, `projectSlugOrId`, `period`, `query`, and `sort`. `tool_parameters` on that same row shows `mcp_server_name` and `mcp_tool_name`. That run is a different process from the trace above, so the trace above does not have this JSON. There is no tool-result body and no assistant text in the logs either.
 
-Tool arguments are not on those spans. With `OTEL_LOG_TOOL_DETAILS=1` and `OTEL_LOG_TOOL_CONTENT=1` (`run_native.py --content` sets both, plus `OTEL_LOG_USER_PROMPTS`), the argument JSON is on the logs for that trace: `tool_parameters` on `claude_code.tool_decision`, and `tool_parameters` plus `tool_input` on `claude_code.tool_result`. The conversation page still does not render them. The picture is Explore > Logs filtered to a content-on run, which is a different process from the 7-call transcript above, so that transcript's logs do not have this JSON. The filter matches 20 logs. The expanded `claude_code.tool_result` shows `tool_parameters` of `mcp_server_name: sentry` and `mcp_tool_name: search_issues`, and `tool_result_size_bytes` 1017. `tool_input` is present and collapsed (`{ 6 items }`). There is no tool-result body and no assistant text in the logs either.
-
-![Content-on logs for one trace. 20 matching logs, with tool_parameters on an expanded claude_code.tool_result.](screenshots/collector-logs.png)
+![Content-on logs through the customer config. One claude_code.tool_result is open, with tool_input expanded to the arguments and tool_parameters showing the MCP tool name.](screenshots/collector-logs.png)
 
 ### Cost
 
-The $0.159 on the conversation page is Sentry's price of the span token attributes at the 5-minute cache-write rate ($3.75 per million). The real cost is the CLI's `result.total_cost_usd`, which matches `cost_usd` on the `claude_code.api_request` logs. On this run that is $0.215. The gap is the 1-hour cache-write rate ($6 per million) the CLI uses. The page does not show that number. Read the CLI total, or sum `cost_usd` on the logs.
+Sentry prices the span token attributes at the 5-minute cache-write rate ($3.75 per million). The CLI's `result.total_cost_usd` matches `cost_usd` on the `claude_code.api_request` logs and uses the 1-hour cache-write rate ($6 per million). The conversation page does not show the CLI total. Read the CLI total, or sum `cost_usd` on the logs.
 
 ### Canary
 
