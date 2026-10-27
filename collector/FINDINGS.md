@@ -2,7 +2,7 @@
 
 Can an OpenTelemetry Collector turn Claude Code's native telemetry into spans that Sentry's Agents > Conversations view renders, with no wrapper code in the agent loop?
 
-**Verdict: works with caveats.** The conversation renders. Tool names and durations are the native ones. Tokens are real. The page cost is positive and is not `result.total_cost_usd`. Haiku becomes an extra LLM call on a second trace. A stock transform processor cannot copy the log's cost onto the span.
+**Verdict: works with caveats.** A clean live run, exported on the first try, renders in Conversations: 7 LLM calls, 0 errors, 113K tokens, $0.159, and "2 traces". The CLI `result.total_cost_usd` for that same process is $0.2151071. The page is using Sentry's 5-minute cache-write price. The CLI and the `cost_usd` values on the `claude_code.api_request` logs are the 1-hour cache-write price. The gap is only that rate. Haiku is still an extra LLM call on a second trace. Turning the content flags on stores the prompt and the tool arguments, and the page still does not show the prompt, the tool arguments, the tool results, or the assistant text.
 
 Claude Code 2.1.177. `otelcol-contrib` 0.163.2, checksum matched the release `.sha256`. `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`. Content flags unset. `tracing.py` was not imported.
 
@@ -50,9 +50,53 @@ A `transform` processor cannot read a log while it is editing a span. The Sonnet
 1. Live diagnosis, transform on, export to Sentry. The file exporter showed the mapping had already been applied (names `invoke_agent dictation-fixer`, `chat {model}`, `execute_tool {tool}`, usage filled, no email attribute). Sentry responded 401, `missing authorization information`, and the exporter dropped the batches. Cause: the auth value was `sentry sentry_key=...` and the shell truncated it to the word `sentry` when the env file was sourced unquoted. The endpoint substitution had worked. This attempt did not land a conversation.
 2. The same batches were posted again to a collector whose header is `sentry sentry_key=${env:SENTRY_OTLP_KEY}` (the key is only the public DSN key). No 401. The spans indexed. The conversation rendered. Stopped here. The mapping was not changed between the attempts. The transform is idempotent on these spans, so sending the already-mapped batch through it again did not add a second copy. Sentry shows one of each span.
 
+## Clean live run
+
+One diagnosis, no replay. The collector was started with the header `sentry sentry_key=${env:SENTRY_OTLP_KEY}` and the env file holds the public DSN key in single quotes (32 characters, no space). The collector log has no 401 and no export failure. Content flags were unset.
+
+The page for that run: 7 LLM calls, 0 errors, 113K tokens, $0.159, and "2 traces". The banner is still "This conversation's inputs and outputs weren't captured". The transcript shows `<not reported>` and the tool rows show `0 B`.
+
+The CLI for that process: exit 0, 10 turns, 67,434 ms, `result.total_cost_usd` 0.2151071. `result.usage`: uncached input 12, output 2,603, cache read 85,127, cache write 24,969. Haiku 579 in / 19 out / $0.000674. Six distinct assistant response ids, plus the Haiku chat, which is the seventh LLM call. The invoke span duration is 67,438.8 ms.
+
+## Cost
+
+Sentry's stored `gen_ai.cost.total_tokens` on the seven chats sums to 0.1589268. None is missing, zero, or negative. The page's $0.159 is that sum.
+
+Pricing each chat from the span token attributes:
+
+| Rate | Cache write | Sum |
+|---|---|---|
+| 5-minute | $3.75 / M | 0.1589268 |
+| 1-hour | $6 / M | 0.2151071 |
+
+Sonnet input $3/M, output $15/M, cache read $0.30/M. Haiku input $1/M, output $5/M. Haiku has no cache write, so both rates give $0.000674, which matches the CLI.
+
+`cost_usd` on the seven `claude_code.api_request` logs also sums to 0.2151071, and each log matches that span's 1-hour price. The 5-minute rate is what Sentry stored and what the page shows. The 1-hour rate is what the CLI and the logs show. The difference is 24,969 cache-write tokens times $2.25/M, which is 0.0561802. No other rate was needed to explain the gap. The invoke span still has no cost attribute, and the transform still does not copy `cost_usd` onto a span.
+
+## Content flags
+
+One diagnosis with `OTEL_LOG_USER_PROMPTS=1`, `OTEL_LOG_TOOL_DETAILS=1`, and `OTEL_LOG_TOOL_CONTENT=1`. The transform copies `user_prompt` into `gen_ai.input.messages` as a one-element JSON array, role `user`, and skips the value when it is `<REDACTED>`.
+
+What was exported, and what Sentry stored:
+
+- The interaction span's `user_prompt` is the prompt text, not `<REDACTED>`. `gen_ai.input.messages` is the JSON array, and its content equals that prompt, including the newlines. Sentry stored that attribute.
+- `claude_code.user_prompt` log attribute `prompt` is the same text. Sentry stored it.
+- Tool spans have the tool name and no argument or result attribute. They have no span events.
+- Each `llm_request` span has one span event, `gen_ai.request.attempt`, with `attempt` and `client_request_id` only. No message text. Sentry's OTLP intake drops span events.
+- `claude_code.tool_decision` logs carry `tool_parameters` (JSON). `claude_code.tool_result` logs carry `tool_parameters`, `tool_input` (JSON arguments), and `tool_result_size_bytes`. There is no tool-result body. Sentry stored those log attributes.
+- No span and no log carries assistant text.
+
+The conversation page for that run: heading "Investigate dictation failure rate alert", 6 LLM calls, 0 errors, 60K, $0.101, "2 traces". The transcript banner still says the inputs and outputs weren't captured. Message bubbles are `<not reported>`. Tool rows are `0 B`. The chat drawer's Input tab says "No input for this span" and its Output tab says "No output for this span". The tool drawer's Input and Output tabs say the same. The heading is not the prompt. The page does not show the prompt, the tool arguments, the tool results, or the assistant text.
+
+## Customer config
+
+`collector/otelcol.customer.yaml` has no file exporter. It drops `tool.execution` and `tool.blocked_on_user` before the mapping. Missing `cache_read_tokens` and `cache_creation_tokens` are set to 0 before the sum. The agent name is `${env:DICTATION_FIXER_AGENT_NAME}`. The user and organization deletes stay. `error_mode: ignore` stays, with a comment that a failing statement is skipped and the span is still exported.
+
+A local fixture with the cache attributes absent produced `gen_ai.usage.input_tokens` equal to the uncached input and cache counts of 0. The two child spans were not exported. A live diagnosis through this file, content flags unset, exported with no 401. Sentry indexed 22 spans for that conversation: 1 `gen_ai.invoke_agent`, 9 `gen_ai.chat`, 12 `gen_ai.execute_tool`, and zero `span.op=default`. Every span's agent name is `dictation-fixer`. No `user.email` came back.
+
 ## What the page shows
 
-The screenshot is this second diagnosis. Header: 6 LLM calls, 0 errors, 64K tokens, $0.123. The row under the date says 2 traces.
+The screenshot is the earlier replayed diagnosis, not the clean live run above. Header: 6 LLM calls, 0 errors, 64K tokens, $0.123. The row under the date says 2 traces.
 
 The CLI for that process: 9 turns, about 45s, `result.total_cost_usd` $0.135, of which Haiku is $0.000674. `result.usage` output 2,372, uncached input 11, cache read 47,724, cache write 14,141. Five distinct assistant response ids.
 
@@ -67,11 +111,11 @@ The CLI for that process: 9 turns, about 45s, `result.total_cost_usd` $0.135, of
 
 | | Wrapper | Collector |
 |---|---|---|
-| What the customer maintains | `tracing.py` (471 lines) and the runner that parses `stream-json` | `collector/otelcol.yaml` (91 lines) plus a running collector. The agent loop only gains env vars |
+| What the customer maintains | `tracing.py` (471 lines) and the runner that parses `stream-json` | `collector/otelcol.yaml` (99 lines) or `collector/otelcol.customer.yaml` (95 lines) plus a running collector. The agent loop only gains env vars |
 | Change in the loop | The process must be started by the runner so it can read the stream | None, if `claude` is already started with the OTEL env vars in the config |
 | Timing | Gaps between `stream-json` events, tagged approximate. The first chat includes CLI and MCP startup | The CLI's own span timestamps. Tool rows above match those timestamps |
 | Tokens | Per assistant message from the stream. Output there is often a handful of tokens. Exact `result.usage` is stored on `invoke_agent` | Per native `llm_request`. `input_tokens` on the span is uncached; the transform adds cache read and cache write before sending, which is what kept the cost positive |
-| Cost | `result.total_cost_usd` on `invoke_agent`. The conversation page still prices the chat spans and under-counts output | No cost attribute exists on the spans. The page shows Sentry's price of the token attributes ($0.123 here) against the CLI's $0.135. `cost_usd` exists on `claude_code.api_request` logs and was not copied onto spans |
+| Cost | `result.total_cost_usd` on `invoke_agent`. The conversation page still prices the chat spans and under-counts output | No cost attribute exists on the spans. On the clean live run the page shows $0.159, which is the 5-minute cache-write price of the span tokens (0.1589268). The CLI and the logs' `cost_usd` are $0.2151071, the 1-hour price. The gap is $2.25/M on 24,969 cache-write tokens. `cost_usd` was not copied onto spans |
 | Haiku | Attribute on `invoke_agent`, not a chat span, so the page does not count it | Own trace, mapped to a `chat` span, same conversation id, so the page counts it. Its log is not on that trace |
 | Log correlation | Wrapper logs are emitted inside the invoke span, so they share its trace | Sonnet `api_request`, tool, and prompt logs share the interaction trace. Haiku's `api_request` and the MCP connection logs do not |
 | Process dies mid-run | Not re-tested here. The wrapper sends a span when it closes; a hard kill drops whatever it has not flushed, and the open invoke span is one of those | Not re-tested by killing `claude`. Export interval is 1s, so a finished span can already have left. The interaction span stays open until the end, so a kill loses it and any unflushed batch. A 401 from Sentry is permanent: the exporter dropped those batches |

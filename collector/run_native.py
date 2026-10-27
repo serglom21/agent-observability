@@ -22,7 +22,7 @@ if "tracing" in sys.modules:
     raise SystemExit("tracing.py was imported; native run aborted")
 
 
-def native_env():
+def native_env(content=False):
     env = claude_env()
     env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"
     env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"
@@ -43,13 +43,18 @@ def native_env():
         "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
     ):
         env.pop(key, None)
+    if content:
+        env["OTEL_LOG_USER_PROMPTS"] = "1"
+        env["OTEL_LOG_TOOL_DETAILS"] = "1"
+        env["OTEL_LOG_TOOL_CONTENT"] = "1"
     return env
 
 
 def main():
     load_env_file()
+    content = "--content" in sys.argv[1:]
     prompt = alert_prompt()
-    env = native_env()
+    env = native_env(content=content)
     proc = subprocess.Popen(
         claude_command(prompt, max_turns=20),
         cwd=str(ROOT),
@@ -90,6 +95,7 @@ def main():
             result = event
     usage = result.get("usage") or {}
     model_usage = result.get("modelUsage") or {}
+    print("content_flags", "on" if content else "off")
     print("exit", code, "stderr_bytes", len(stderr))
     print(
         "turns",

@@ -28,6 +28,14 @@ processors:
           - set(attributes["sentry.op"], "gen_ai.invoke_agent") where attributes["span.type"] == "interaction"
           - set(attributes["gen_ai.agent.name"], "dictation-fixer") where attributes["span.type"] == "interaction"
           - set(name, "invoke_agent dictation-fixer") where attributes["span.type"] == "interaction"
+          # Only when the CLI actually stored the prompt. <REDACTED> is the unset-flag placeholder.
+          - set(attributes["tmp.prompt"], attributes["user_prompt"]) where attributes["span.type"] == "interaction" and attributes["user_prompt"] != nil and attributes["user_prompt"] != "<REDACTED>"
+          - replace_pattern(attributes["tmp.prompt"], "\\\\", "\\\\") where attributes["tmp.prompt"] != nil
+          - replace_pattern(attributes["tmp.prompt"], "\"", "\\\"") where attributes["tmp.prompt"] != nil
+          - replace_pattern(attributes["tmp.prompt"], "\n", "\\n") where attributes["tmp.prompt"] != nil
+          - replace_pattern(attributes["tmp.prompt"], "\r", "") where attributes["tmp.prompt"] != nil
+          - set(attributes["gen_ai.input.messages"], Concat(["[{\"role\":\"user\",\"content\":\"", attributes["tmp.prompt"], "\"}]"], "")) where attributes["tmp.prompt"] != nil
+          - delete_key(attributes, "tmp.prompt") where attributes["tmp.prompt"] != nil
 
           - set(attributes["gen_ai.operation.name"], "chat") where attributes["span.type"] == "llm_request"
           - set(attributes["sentry.op"], "gen_ai.chat") where attributes["span.type"] == "llm_request"
