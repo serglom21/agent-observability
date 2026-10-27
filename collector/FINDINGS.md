@@ -85,7 +85,7 @@ The conversation page for that run: heading "Investigate dictation failure rate 
 
 ## Customer config
 
-`collector/otelcol.customer.yaml` has no file exporter. It drops `tool.execution` and `tool.blocked_on_user` before the mapping. Missing `cache_read_tokens` and `cache_creation_tokens` are set to 0 before the sum. The agent name is `${env:AGENT_NAME}`. `AGENT_NAME` is required. If it is unset the span name is the message `AGENT_NAME is unset`. The user and organization deletes stay. `error_mode: ignore` stays, with a comment that a failing statement is skipped and the span is still exported.
+`collector/otelcol.customer.yaml` has no file exporter. It drops `tool.execution` and `tool.blocked_on_user` before the mapping. Missing `cache_read_tokens` and `cache_creation_tokens` are set to 0 before the sum. The agent name is `${env:AGENT_NAME}`. `AGENT_NAME` is required. If it is unset the span name is the message `AGENT_NAME is unset`. The user and organization deletes stay, in a processor after the mapping. `error_mode: ignore` stays, with a comment that a failing statement is skipped and the span is still exported. Cache counts are written only as `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens`.
 
 A local fixture with the cache attributes absent produced `gen_ai.usage.input_tokens` equal to the uncached input and cache counts of 0. The two child spans were not exported. A live diagnosis through this file, content flags unset, exported. Sentry indexed 22 spans for that conversation: 1 `gen_ai.invoke_agent`, 9 `gen_ai.chat`, 12 `gen_ai.execute_tool`, and zero `span.op=default`. Every span's agent name is `dictation-fixer`. No `user.email` came back.
 
@@ -103,7 +103,7 @@ The screenshot is the clean live run above. Header: 7 LLM calls, 0 errors, 113K 
 
 | | Wrapper | Collector |
 |---|---|---|
-| What the customer maintains | `tracing.py` (471 lines) and the runner that parses `stream-json` | `collector/otelcol.yaml` (99 lines) or `collector/otelcol.customer.yaml` (95 lines) plus a running collector. The agent loop only gains env vars |
+| What the customer maintains | `tracing.py` (471 lines) and the runner that parses `stream-json` | `collector/otelcol.yaml` (99 lines) or `collector/otelcol.customer.yaml` (99 lines) plus a running collector. The agent loop only gains env vars |
 | Change in the loop | The process must be started by the runner so it can read the stream | None, if `claude` is already started with the OTEL env vars in the config |
 | Timing | Gaps between `stream-json` events, tagged approximate. The first chat includes CLI and MCP startup | The CLI's own span timestamps. Tool rows above match those timestamps |
 | Tokens | Per assistant message from the stream. Output there is often a handful of tokens. Exact `result.usage` is stored on `invoke_agent` | Per native `llm_request`. `input_tokens` on the span is uncached; the transform adds cache read and cache write before sending, which is what kept the cost positive |

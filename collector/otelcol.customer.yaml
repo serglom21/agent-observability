@@ -1,8 +1,6 @@
-# Customer-shaped collector config. Endpoints and the auth header come from
-# the environment. Nothing here is a secret or an id. No file exporter: the
-# only destination is Sentry.
-#
-# AGENT_NAME is required. If it is unset the span name is the message below.
+# Drops tool child spans, maps Claude Code spans onto gen_ai, and strips identity before export.
+# Required env: AGENT_NAME, SENTRY_OTLP_KEY, SENTRY_OTLP_TRACES_ENDPOINT, SENTRY_OTLP_LOGS_ENDPOINT.
+# No file exporter. The only destination is Sentry.
 
 receivers:
   otlp:
@@ -11,67 +9,74 @@ receivers:
         endpoint: 127.0.0.1:4318
 
 processors:
-  # tool.execution has no tool name. tool.blocked_on_user is a 0–1 ms child.
-  # Both would land as span.op=default. Drop them before the mapping.
+  # tool.execution has no tool name and tool.blocked_on_user is a 0–1 ms child; both would be span.op=default.
   filter/drop_tool_children:
     error_mode: ignore
     traces:
       span:
         - 'attributes["span.type"] == "tool.execution" or attributes["span.type"] == "tool.blocked_on_user"'
 
+  # error_mode ignore: a statement that fails at runtime is skipped and the span is still exported.
   transform/genai:
-    # error_mode: ignore skips a statement that fails at runtime and still
-    # exports the span. A typo drops that one mapping silently instead of
-    # failing the pipeline.
+    error_mode: ignore
+    trace_statements:
+      # Every span: the conversation id is the Claude session.
+      - context: span
+        conditions:
+          - attributes["session.id"] != nil
+        statements:
+          - set(attributes["gen_ai.conversation.id"], attributes["session.id"])
+
+      # interaction becomes invoke_agent.
+      - context: span
+        conditions:
+          - attributes["span.type"] == "interaction"
+        statements:
+          - set(attributes["gen_ai.operation.name"], "invoke_agent")
+          - set(attributes["sentry.op"], "gen_ai.invoke_agent")
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}")
+          - set(name, Concat(["invoke_agent ", "${env:AGENT_NAME:-AGENT_NAME is unset}"], ""))
+
+      # llm_request becomes chat; a missing cache count is 0 so the input sum still runs.
+      - context: span
+        conditions:
+          - attributes["span.type"] == "llm_request"
+        statements:
+          - set(attributes["gen_ai.operation.name"], "chat")
+          - set(attributes["sentry.op"], "gen_ai.chat")
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}")
+          - set(attributes["gen_ai.response.model"], attributes["model"]) where attributes["model"] != nil
+          - set(attributes["cache_read_tokens"], 0) where attributes["cache_read_tokens"] == nil
+          - set(attributes["cache_creation_tokens"], 0) where attributes["cache_creation_tokens"] == nil
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"]) where attributes["input_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_read.input_tokens"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_creation.input_tokens"], attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["output_tokens"] != nil
+          - set(attributes["gen_ai.usage.total_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"] + attributes["output_tokens"]) where attributes["input_tokens"] != nil
+          - set(name, Concat(["chat ", attributes["model"]], "")) where attributes["model"] != nil
+
+      # tool becomes execute_tool.
+      - context: span
+        conditions:
+          - attributes["span.type"] == "tool"
+        statements:
+          - set(attributes["gen_ai.operation.name"], "execute_tool")
+          - set(attributes["sentry.op"], "gen_ai.execute_tool")
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}")
+          - set(attributes["gen_ai.tool.name"], attributes["tool_name"]) where attributes["tool_name"] != nil
+          - set(name, Concat(["execute_tool ", attributes["tool_name"]], "")) where attributes["tool_name"] != nil
+
+  # Removes account, organization, and email attributes so they are not stored.
+  transform/strip_identity:
     error_mode: ignore
     trace_statements:
       - context: span
         statements:
-          - set(attributes["gen_ai.conversation.id"], attributes["session.id"]) where attributes["session.id"] != nil
-
-          - set(attributes["gen_ai.operation.name"], "invoke_agent") where attributes["span.type"] == "interaction"
-          - set(attributes["sentry.op"], "gen_ai.invoke_agent") where attributes["span.type"] == "interaction"
-          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "interaction"
-          - set(name, Concat(["invoke_agent ", "${env:AGENT_NAME:-AGENT_NAME is unset}"], "")) where attributes["span.type"] == "interaction"
-
-          - set(attributes["gen_ai.operation.name"], "chat") where attributes["span.type"] == "llm_request"
-          - set(attributes["sentry.op"], "gen_ai.chat") where attributes["span.type"] == "llm_request"
-          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "llm_request"
-          - set(attributes["gen_ai.response.model"], attributes["model"]) where attributes["span.type"] == "llm_request" and attributes["model"] != nil
-          # A missing cache attribute must not skip the sum. Default it to 0
-          # before adding. input_tokens on the span is the uncached count.
-          # Sentry prices (input - cache read - cache write), so input must
-          # include both.
-          - set(attributes["cache_read_tokens"], 0) where attributes["span.type"] == "llm_request" and attributes["cache_read_tokens"] == nil
-          - set(attributes["cache_creation_tokens"], 0) where attributes["span.type"] == "llm_request" and attributes["cache_creation_tokens"] == nil
-          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["input_tokens"] != nil
-          - set(attributes["gen_ai.usage.input_tokens.cached"], attributes["cache_read_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_read_tokens"] != nil
-          - set(attributes["gen_ai.usage.cache_read.input_tokens"], attributes["cache_read_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_read_tokens"] != nil
-          - set(attributes["gen_ai.usage.input_tokens.cache_write"], attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_creation_tokens"] != nil
-          - set(attributes["gen_ai.usage.cache_creation.input_tokens"], attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_creation_tokens"] != nil
-          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["span.type"] == "llm_request" and attributes["output_tokens"] != nil
-          - set(attributes["gen_ai.usage.total_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"] + attributes["output_tokens"]) where attributes["span.type"] == "llm_request" and attributes["input_tokens"] != nil
-          - set(name, Concat(["chat ", attributes["model"]], "")) where attributes["span.type"] == "llm_request" and attributes["model"] != nil
-
-          - set(attributes["gen_ai.operation.name"], "execute_tool") where attributes["span.type"] == "tool"
-          - set(attributes["sentry.op"], "gen_ai.execute_tool") where attributes["span.type"] == "tool"
-          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "tool"
-          - set(attributes["gen_ai.tool.name"], attributes["tool_name"]) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
-          - set(name, Concat(["execute_tool ", attributes["tool_name"]], "")) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
-
-          - delete_key(attributes, "user.email") where attributes["user.email"] != nil
-          - delete_key(attributes, "user.id") where attributes["user.id"] != nil
-          - delete_key(attributes, "user.account_id") where attributes["user.account_id"] != nil
-          - delete_key(attributes, "user.account_uuid") where attributes["user.account_uuid"] != nil
-          - delete_key(attributes, "organization.id") where attributes["organization.id"] != nil
+          - 'delete_matching_keys(attributes, "^(user\\.(email|id|account_id|account_uuid)|organization\\.id)$")'
     log_statements:
       - context: log
         statements:
-          - delete_key(attributes, "user.email") where attributes["user.email"] != nil
-          - delete_key(attributes, "user.id") where attributes["user.id"] != nil
-          - delete_key(attributes, "user.account_id") where attributes["user.account_id"] != nil
-          - delete_key(attributes, "user.account_uuid") where attributes["user.account_uuid"] != nil
-          - delete_key(attributes, "organization.id") where attributes["organization.id"] != nil
+          - 'delete_matching_keys(attributes, "^(user\\.(email|id|account_id|account_uuid)|organization\\.id)$")'
 
 exporters:
   otlp_http/sentry:
@@ -86,9 +91,9 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [filter/drop_tool_children, transform/genai]
+      processors: [filter/drop_tool_children, transform/genai, transform/strip_identity]
       exporters: [otlp_http/sentry]
     logs:
       receivers: [otlp]
-      processors: [transform/genai]
+      processors: [transform/strip_identity]
       exporters: [otlp_http/sentry]

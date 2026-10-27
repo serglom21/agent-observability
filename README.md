@@ -6,7 +6,7 @@ Two ways to get that session into Sentry's Agents > Conversations view. Option A
 
 An OpenTelemetry Collector sits between Claude Code and Sentry. Claude's own telemetry stays in its process. The collector renames `claude_code.interaction`, `claude_code.llm_request`, and `claude_code.tool` into the `gen_ai` spans Conversations renders. Nothing in the agent loop imports `tracing.py`.
 
-The config to run is `collector/otelcol.customer.yaml`. It does not write a file. It drops the `tool.execution` and `tool.blocked_on_user` child spans, fills a missing cache count with 0, and deletes the user and organization attributes. `collector/otelcol.yaml` is the experiment config: same mapping, plus a file exporter and a prompt mapping. Tested with Claude Code 2.1.177 and `otelcol-contrib` 0.163.2.
+The config to run is `collector/otelcol.customer.yaml` (99 lines). It does not write a file. Three processors run in order: drop `tool.execution` and `tool.blocked_on_user`, map the remaining spans onto `gen_ai` (a missing cache count is filled with 0), then delete account, organization, and email attributes. `collector/otelcol.yaml` is the experiment config: same mapping, plus a file exporter and a prompt mapping. Tested with Claude Code 2.1.177 and `otelcol-contrib` 0.163.2.
 
 ### Quickstart
 
