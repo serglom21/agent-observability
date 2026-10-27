@@ -40,19 +40,17 @@ If `SENTRY_WEBHOOK_SECRET` is set, the request must send `Sentry-Hook-Signature`
 
 ## What the page shows
 
-Content off. Session `14d2f4ba-c3cc-4b1a-8835-b22834f6d7ce`, trace `662e1196fd8a48f199b4ab85d58e3324`. Approximate stream-arrival timing. Four assistant response ids, four `gen_ai.chat` spans, no duplicate id. The page's LLM call count is 4, the same as those ids. Haiku ran once and is not a span, so the page does not count it. Four ids plus Haiku is 5 model calls.
+Content on. Approximate stream-arrival timing. Five assistant response ids, five `gen_ai.chat` spans, no duplicate id. The page's LLM call count is 5, the same as those ids. Haiku ran once and is not a span, so the page does not count it. Five ids plus Haiku is 6 model calls.
 
-![Conversation transcript. Content is off, so tool rows show 0 B. Each chat is one response id.](screenshots/conversation.png)
+![Conversation transcript with content capture on. The header shows 5 LLM calls, 0 errors, 68K tokens, and $0.0809. The crop stops above the final answer.](screenshots/conversation.png)
 
-The transcript lists `ToolSearch` and the Sentry MCP tools. A banner says the prompt and tool bodies were not captured. **0 B** on a tool row means that body was not stored. It does not mean the tool returned an empty result. This picture shows 4 LLM calls, 0 errors, 50K tokens, and $0.0704. The 50K is the sum of the stream's per-message usage. Those four chats report 11 output tokens in all. `result.usage` output is 1,757, and that exact total is on `gen_ai.invoke_agent`, so the conversation summary under-counts output. Haiku is not a chat span, so the page does not count it. The CLI reported $0.133 for this run (6 turns, about 39s).
+The transcript starts with the first assistant message, then `ToolSearch` and the Sentry MCP tools with their arguments, sizes, durations, and costs. The alert text is stored on `gen_ai.invoke_agent` as `gen_ai.input.messages`. This conversation page does not render that user message, so the picture starts at the assistant's first line. The crop stops above the final answer. That answer said a recent release caused the alert. The other runs on this prompt said the same thing, and this demo does not claim that is correct, so the answer is not in the picture. This picture shows 5 LLM calls, 0 errors, 68K tokens, and $0.0809. The 68K is the sum of the stream's per-message usage. Those five chats report 25 output tokens in all. `result.usage` output is 2,135, and that exact total is on `gen_ai.invoke_agent`, so the conversation summary under-counts output. Haiku is not a chat span, so the page does not count it. The CLI reported $0.152 for this run (8 turns, about 42s).
+
+With content capture left off, the same page shows names, durations, and tokens, and the prompts and results read `<not reported>`.
 
 ![Approximate waterfall through the last chat. The 0.06ms parent is the segment closed so the trace can be listed. The first chat includes CLI and MCP startup.](screenshots/trace.png)
 
-Earlier run `d05caab3414749b4a4f94268d8758387`, the whole tree, through the 17.79s chat. The top row, `gen_ai.invoke_agent` named `dictation-fixer`, is **0.06ms**. That span is closed before `claude` starts so Sentry will list the trace while `invoke_agent` is still open. It is not a model call. The long bar under it is `invoke_agent` (45.58s). The first `gen_ai.chat` is 4.46s and starts when the wrapper opens it, before the CLI and MCP are up, so that bar includes startup. Later chats stay open for the rest of the same response id, including across a tool result.
-
-Content on, an older run. Session `3455f50d-4ddd-4519-9e72-60868ec8562d`, trace `3216110cfae6473889e2044c269c0a5e`. The crop stops above the final answer. That answer said a recent release caused the alert. The other runs on this prompt said the same thing, and this demo does not claim that is correct, so the answer is not in the picture. The prompt and tool arguments above it are.
-
-![Content capture on, cropped above the final answer. The prompt and tool arguments are visible.](screenshots/content.png)
+Earlier content-off run, the whole tree, through the 17.79s chat. The top row, `gen_ai.invoke_agent` named `dictation-fixer`, is **0.06ms**. That span is closed before `claude` starts so Sentry will list the trace while `invoke_agent` is still open. It is not a model call. The long bar under it is `invoke_agent` (45.58s). The first `gen_ai.chat` is 4.46s and starts when the wrapper opens it, before the CLI and MCP are up, so that bar includes startup. Later chats stay open for the rest of the same response id, including across a tool result.
 
 ## Env vars
 
@@ -74,7 +72,7 @@ Content on, an older run. Session `3455f50d-4ddd-4519-9e72-60868ec8562d`, trace 
 
 ## Content capture
 
-Leave `DICTATION_FIXER_CAPTURE_CONTENT` unset. Spans then carry names, durations, and token counts. The transcript shows **0 B** where a body would have been.
+Leave `DICTATION_FIXER_CAPTURE_CONTENT` unset. Spans then carry names, durations, and token counts. The same page shows names, durations, and tokens, and the prompts and results read `<not reported>`. A tool row that shows **0 B** means that body was not stored. It does not mean the tool returned an empty result.
 
 Setting it to `1` sends message and tool bodies. On the dictation-fixer project the data scrubber is on, with default scrubbers, and it still did not remove file paths or organization slugs. Do not turn this on against a project whose scrubbing you have not checked.
 
@@ -114,6 +112,6 @@ Sentry's OTLP endpoint accepts traces and logs. `POST .../v1/metrics` returns 40
 
 The CLI's `input_tokens` is the uncached count. Sentry prices `(input - cache read - cache write)` at the input rate, then adds cache read and cache write at their own rates. Copying the uncached count across next to those cache fields makes the cost negative. `usage_attributes()` sets `gen_ai.usage.input_tokens` to uncached + cache read + cache write. The alias fields are the same counts as `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens`. A one-trace check priced both layouts the same.
 
-Sentry's cost is an estimate. For `claude-sonnet-4-6` it prices cache writes at the 5-minute rate, $3.75 per million tokens. These runs write a 1-hour cache (`ephemeral_1h`), which the CLI prices at $6 per million. Sentry can therefore under-report. On this run its price of the Sonnet tokens was $0.097 and `result.total_cost_usd` was $0.133. The real figure is `result.total_cost_usd` on the `gen_ai.invoke_agent` span (`gen_ai.usage.total_cost_usd`). The conversation summary sums the chat spans. It is not that figure. The page shows $0.0704 because those spans carry the stream's output count, 11 tokens, not the 1,757 on `result.usage`. A row that reads `<$0.01` is a positive cost under one cent. Haiku is not a chat span, so its cost is not in the summary.
+Sentry's cost is an estimate. For `claude-sonnet-4-6` it prices cache writes at the 5-minute rate, $3.75 per million tokens. These runs write a 1-hour cache (`ephemeral_1h`), which the CLI prices at $6 per million. Sentry can therefore under-report. On this run its price of the Sonnet tokens was $0.113 and `result.total_cost_usd` was $0.152. The real figure is `result.total_cost_usd` on the `gen_ai.invoke_agent` span (`gen_ai.usage.total_cost_usd`). The conversation summary sums the chat spans. It is not that figure. The page shows $0.0809 because those spans carry the stream's output count, 25 tokens, not the 2,135 on `result.usage`. A row that reads `<$0.01` is a positive cost under one cent. Haiku is not a chat span, so its cost is not in the summary.
 
-Chat spans keep the output count from the stream. Several messages report 1 output token. On this run the four chats summed to 11 output tokens, and `result.usage` output was 1,757. That exact total is on `invoke_agent` only. Sonnet input on the chats matches `result.usage` (50,258, of which 34,257 are cache read and 15,991 are cache write). Haiku is 579 input and 19 output, on `gen_ai.side_model.*`, outside `result.usage`.
+Chat spans keep the output count from the stream. Several messages report 1 output token. On this run the five chats summed to 25 output tokens, and `result.usage` output was 2,135. That exact total is on `invoke_agent` only. Sonnet input on the chats matches `result.usage` (68,833, of which 51,484 are cache read and 17,338 are cache write). Haiku is 579 input and 19 output, on `gen_ai.side_model.*`, outside `result.usage`.
