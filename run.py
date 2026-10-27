@@ -13,8 +13,6 @@ import threading
 import time
 from pathlib import Path
 
-from tracing import LiveRun, content_enabled, handle_line, init_sdk, usage_attributes
-
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 AGENT_HOME = ROOT / "agent-home"
@@ -114,6 +112,7 @@ def claude_command(prompt, max_turns):
 
 def run_once(max_turns=20, project=None, alert_name=None):
     import sentry_sdk
+    from tracing import LiveRun, handle_line, init_sdk
 
     prompt = alert_prompt(project=project, alert_name=alert_name)
     model = os.environ.get("CLAUDE_MODEL", "").strip() or "sonnet"
@@ -245,11 +244,15 @@ def print_summary(summary, path):
 def _add_usage(total, raw):
     if not raw:
         return
+    from tracing import usage_attributes
+
     for key, value in usage_attributes(raw).items():
         total[key] = total.get(key, 0) + value
 
 
 def _blank_usage():
+    from tracing import usage_attributes
+
     return usage_attributes({})
 
 
@@ -271,6 +274,8 @@ def print_reconciliation(summary):
         haiku_models.append(name)
         _add_usage(haiku_sum, raw)
     combined = {key: chat_sum[key] + haiku_sum[key] for key in chat_sum}
+    from tracing import usage_attributes
+
     result_usage = usage_attributes(
         {
             "input_tokens": (summary.get("usage") or {}).get("input_tokens"),
@@ -315,6 +320,8 @@ def main():
         os.execv(str(venv_python), [str(venv_python), __file__, *sys.argv[1:]])
     max_turns, repeat = parse_args(sys.argv[1:])
     for index in range(1, repeat + 1):
+        from tracing import content_enabled
+
         print(
             f"\n=== run {index}/{repeat} content={content_enabled()} max_turns={max_turns} ===",
             flush=True,

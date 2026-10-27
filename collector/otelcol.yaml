@@ -1,0 +1,91 @@
+# Map Claude Code native spans onto the gen_ai attributes Sentry's
+# Conversations view reads. Endpoints and the auth header come from the
+# environment. Nothing here is a secret or an id.
+#
+# A stored wrapper span uses span.op and the sentry.op attribute
+# gen_ai.invoke_agent / gen_ai.chat / gen_ai.execute_tool, plus
+# gen_ai.operation.name invoke_agent / chat / execute_tool and
+# gen_ai.conversation.id. Docs: the op is gen_ai.{operation.name}.
+# Token counts are copied from attributes that are already on
+# claude_code.llm_request. There is no cost attribute on those spans.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  transform/genai:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # Every native span carries session.id, including the separate Haiku trace.
+          - set(attributes["gen_ai.conversation.id"], attributes["session.id"]) where attributes["session.id"] != nil
+
+          - set(attributes["gen_ai.operation.name"], "invoke_agent") where attributes["span.type"] == "interaction"
+          - set(attributes["sentry.op"], "gen_ai.invoke_agent") where attributes["span.type"] == "interaction"
+          - set(attributes["gen_ai.agent.name"], "dictation-fixer") where attributes["span.type"] == "interaction"
+          - set(name, "invoke_agent dictation-fixer") where attributes["span.type"] == "interaction"
+
+          - set(attributes["gen_ai.operation.name"], "chat") where attributes["span.type"] == "llm_request"
+          - set(attributes["sentry.op"], "gen_ai.chat") where attributes["span.type"] == "llm_request"
+          - set(attributes["gen_ai.agent.name"], "dictation-fixer") where attributes["span.type"] == "llm_request"
+          - set(attributes["gen_ai.response.model"], attributes["model"]) where attributes["span.type"] == "llm_request" and attributes["model"] != nil
+          # input_tokens on the span is the uncached count. Sentry prices
+          # (input - cache read - cache write), so input must include both.
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["input_tokens"] != nil
+          - set(attributes["gen_ai.usage.input_tokens.cached"], attributes["cache_read_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_read.input_tokens"], attributes["cache_read_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.input_tokens.cache_write"], attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_creation_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_creation.input_tokens"], attributes["cache_creation_tokens"]) where attributes["span.type"] == "llm_request" and attributes["cache_creation_tokens"] != nil
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["span.type"] == "llm_request" and attributes["output_tokens"] != nil
+          - set(attributes["gen_ai.usage.total_tokens"], attributes["input_tokens"] + attributes["cache_read_tokens"] + attributes["cache_creation_tokens"] + attributes["output_tokens"]) where attributes["span.type"] == "llm_request" and attributes["input_tokens"] != nil
+          - set(name, Concat(["chat ", attributes["model"]], "")) where attributes["span.type"] == "llm_request" and attributes["model"] != nil
+
+          - set(attributes["gen_ai.operation.name"], "execute_tool") where attributes["span.type"] == "tool"
+          - set(attributes["sentry.op"], "gen_ai.execute_tool") where attributes["span.type"] == "tool"
+          - set(attributes["gen_ai.agent.name"], "dictation-fixer") where attributes["span.type"] == "tool"
+          - set(attributes["gen_ai.tool.name"], attributes["tool_name"]) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
+          - set(name, Concat(["execute_tool ", attributes["tool_name"]], "")) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
+
+          # Not needed for the mapping. Drop them so the page does not show an account.
+          - delete_key(attributes, "user.email") where attributes["user.email"] != nil
+          - delete_key(attributes, "user.id") where attributes["user.id"] != nil
+          - delete_key(attributes, "user.account_id") where attributes["user.account_id"] != nil
+          - delete_key(attributes, "user.account_uuid") where attributes["user.account_uuid"] != nil
+          - delete_key(attributes, "organization.id") where attributes["organization.id"] != nil
+    log_statements:
+      - context: log
+        statements:
+          - delete_key(attributes, "user.email") where attributes["user.email"] != nil
+          - delete_key(attributes, "user.id") where attributes["user.id"] != nil
+          - delete_key(attributes, "user.account_id") where attributes["user.account_id"] != nil
+          - delete_key(attributes, "user.account_uuid") where attributes["user.account_uuid"] != nil
+          - delete_key(attributes, "organization.id") where attributes["organization.id"] != nil
+
+exporters:
+  otlp_http/sentry:
+    traces_endpoint: ${env:SENTRY_OTLP_TRACES_ENDPOINT}
+    logs_endpoint: ${env:SENTRY_OTLP_LOGS_ENDPOINT}
+    headers:
+      # Public DSN key only. The "sentry sentry_key=" prefix is Sentry's header format.
+      x-sentry-auth: "sentry sentry_key=${env:SENTRY_OTLP_KEY}"
+    compression: gzip
+    encoding: proto
+  file/traces:
+    path: ${env:NATIVE_CAPTURE_DIR}/traces.json
+  file/logs:
+    path: ${env:NATIVE_CAPTURE_DIR}/logs.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [transform/genai]
+      exporters: [otlp_http/sentry, file/traces]
+    logs:
+      receivers: [otlp]
+      processors: [transform/genai]
+      exporters: [otlp_http/sentry, file/logs]

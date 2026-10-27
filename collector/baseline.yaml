@@ -1,0 +1,21 @@
+# Capture Claude Code's native OTLP unchanged. No transform, no Sentry export.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+exporters:
+  file/traces:
+    path: ${env:NATIVE_CAPTURE_DIR}/traces.json
+  file/logs:
+    path: ${env:NATIVE_CAPTURE_DIR}/logs.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file/traces]
+    logs:
+      receivers: [otlp]
+      exporters: [file/logs]
