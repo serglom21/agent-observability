@@ -2,8 +2,7 @@
 # the environment. Nothing here is a secret or an id. No file exporter: the
 # only destination is Sentry.
 #
-# Agent name is ${env:DICTATION_FIXER_AGENT_NAME}. Set it before starting
-# the collector.
+# AGENT_NAME is required. If it is unset the span name is the message below.
 
 receivers:
   otlp:
@@ -32,12 +31,12 @@ processors:
 
           - set(attributes["gen_ai.operation.name"], "invoke_agent") where attributes["span.type"] == "interaction"
           - set(attributes["sentry.op"], "gen_ai.invoke_agent") where attributes["span.type"] == "interaction"
-          - set(attributes["gen_ai.agent.name"], "${env:DICTATION_FIXER_AGENT_NAME}") where attributes["span.type"] == "interaction"
-          - set(name, Concat(["invoke_agent ", "${env:DICTATION_FIXER_AGENT_NAME}"], "")) where attributes["span.type"] == "interaction"
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "interaction"
+          - set(name, Concat(["invoke_agent ", "${env:AGENT_NAME:-AGENT_NAME is unset}"], "")) where attributes["span.type"] == "interaction"
 
           - set(attributes["gen_ai.operation.name"], "chat") where attributes["span.type"] == "llm_request"
           - set(attributes["sentry.op"], "gen_ai.chat") where attributes["span.type"] == "llm_request"
-          - set(attributes["gen_ai.agent.name"], "${env:DICTATION_FIXER_AGENT_NAME}") where attributes["span.type"] == "llm_request"
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "llm_request"
           - set(attributes["gen_ai.response.model"], attributes["model"]) where attributes["span.type"] == "llm_request" and attributes["model"] != nil
           # A missing cache attribute must not skip the sum. Default it to 0
           # before adding. input_tokens on the span is the uncached count.
@@ -56,7 +55,7 @@ processors:
 
           - set(attributes["gen_ai.operation.name"], "execute_tool") where attributes["span.type"] == "tool"
           - set(attributes["sentry.op"], "gen_ai.execute_tool") where attributes["span.type"] == "tool"
-          - set(attributes["gen_ai.agent.name"], "${env:DICTATION_FIXER_AGENT_NAME}") where attributes["span.type"] == "tool"
+          - set(attributes["gen_ai.agent.name"], "${env:AGENT_NAME:-AGENT_NAME is unset}") where attributes["span.type"] == "tool"
           - set(attributes["gen_ai.tool.name"], attributes["tool_name"]) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
           - set(name, Concat(["execute_tool ", attributes["tool_name"]], "")) where attributes["span.type"] == "tool" and attributes["tool_name"] != nil
 

@@ -4,9 +4,9 @@ Can an OpenTelemetry Collector turn Claude Code's native telemetry into spans th
 
 **Verdict: works with caveats.** A clean live run, exported on the first try, renders in Conversations: 7 LLM calls, 0 errors, 113K tokens, $0.159, and "2 traces". The CLI `result.total_cost_usd` for that same process is $0.2151071. The page is using Sentry's 5-minute cache-write price. The CLI and the `cost_usd` values on the `claude_code.api_request` logs are the 1-hour cache-write price. The gap is only that rate. Haiku is still an extra LLM call on a second trace. Turning the content flags on stores the prompt and the tool arguments, and the page still does not show the prompt, the tool arguments, the tool results, or the assistant text.
 
-Claude Code 2.1.177. `otelcol-contrib` 0.163.2, checksum matched the release `.sha256`. `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`. Content flags unset. `tracing.py` was not imported.
+Claude Code 2.1.177. `otelcol-contrib` 0.163.2, checksum matched the release `.sha256`. `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`. Content flags unset on the run in the screenshot. `tracing.py` was not imported.
 
-Two diagnoses. The shape section is the no-transform capture. The live section is a later diagnosis of the same prompt, the one in the screenshot. They are not the same run.
+The shape section is an earlier no-transform capture of the same prompt. The screenshot and the clean-live section are the later run.
 
 ## What Sentry reads
 
@@ -45,14 +45,9 @@ Logs from that capture: `claude_code.user_prompt`, `claude_code.api_request` (6)
 
 A `transform` processor cannot read a log while it is editing a span. The Sonnet logs and spans both have `request_id`, so a custom processor could join `cost_usd` onto the matching span. The stock collector config in this repo does not. The Haiku log would have to be joined on `request_id` too, because it has no trace id. This experiment does not set `gen_ai.usage.total_cost_usd`. Sentry prices the token attributes itself.
 
-## Attempts
-
-1. Live diagnosis, transform on, export to Sentry. The file exporter showed the mapping had already been applied (names `invoke_agent dictation-fixer`, `chat {model}`, `execute_tool {tool}`, usage filled, no email attribute). Sentry responded 401, `missing authorization information`, and the exporter dropped the batches. Cause: the auth value was `sentry sentry_key=...` and the shell truncated it to the word `sentry` when the env file was sourced unquoted. The endpoint substitution had worked. This attempt did not land a conversation.
-2. The same batches were posted again to a collector whose header is `sentry sentry_key=${env:SENTRY_OTLP_KEY}` (the key is only the public DSN key). No 401. The spans indexed. The conversation rendered. Stopped here. The mapping was not changed between the attempts. The transform is idempotent on these spans, so sending the already-mapped batch through it again did not add a second copy. Sentry shows one of each span.
-
 ## Clean live run
 
-One diagnosis, no replay. The collector was started with the header `sentry sentry_key=${env:SENTRY_OTLP_KEY}` and the env file holds the public DSN key in single quotes (32 characters, no space). The collector log has no 401 and no export failure. Content flags were unset.
+One diagnosis. The collector was started with the header `sentry sentry_key=${env:SENTRY_OTLP_KEY}` and the env file holds the public DSN key in single quotes (32 characters, no space). Content flags were unset.
 
 The page for that run: 7 LLM calls, 0 errors, 113K tokens, $0.159, and "2 traces". The banner is still "This conversation's inputs and outputs weren't captured". The transcript shows `<not reported>` and the tool rows show `0 B`.
 
@@ -90,21 +85,18 @@ The conversation page for that run: heading "Investigate dictation failure rate 
 
 ## Customer config
 
-`collector/otelcol.customer.yaml` has no file exporter. It drops `tool.execution` and `tool.blocked_on_user` before the mapping. Missing `cache_read_tokens` and `cache_creation_tokens` are set to 0 before the sum. The agent name is `${env:DICTATION_FIXER_AGENT_NAME}`. The user and organization deletes stay. `error_mode: ignore` stays, with a comment that a failing statement is skipped and the span is still exported.
+`collector/otelcol.customer.yaml` has no file exporter. It drops `tool.execution` and `tool.blocked_on_user` before the mapping. Missing `cache_read_tokens` and `cache_creation_tokens` are set to 0 before the sum. The agent name is `${env:AGENT_NAME}`. `AGENT_NAME` is required. If it is unset the span name is the message `AGENT_NAME is unset`. The user and organization deletes stay. `error_mode: ignore` stays, with a comment that a failing statement is skipped and the span is still exported.
 
-A local fixture with the cache attributes absent produced `gen_ai.usage.input_tokens` equal to the uncached input and cache counts of 0. The two child spans were not exported. A live diagnosis through this file, content flags unset, exported with no 401. Sentry indexed 22 spans for that conversation: 1 `gen_ai.invoke_agent`, 9 `gen_ai.chat`, 12 `gen_ai.execute_tool`, and zero `span.op=default`. Every span's agent name is `dictation-fixer`. No `user.email` came back.
+A local fixture with the cache attributes absent produced `gen_ai.usage.input_tokens` equal to the uncached input and cache counts of 0. The two child spans were not exported. A live diagnosis through this file, content flags unset, exported. Sentry indexed 22 spans for that conversation: 1 `gen_ai.invoke_agent`, 9 `gen_ai.chat`, 12 `gen_ai.execute_tool`, and zero `span.op=default`. Every span's agent name is `dictation-fixer`. No `user.email` came back.
 
 ## What the page shows
 
-The screenshot is the earlier replayed diagnosis, not the clean live run above. Header: 6 LLM calls, 0 errors, 64K tokens, $0.123. The row under the date says 2 traces.
+The screenshot is the clean live run above. Header: 7 LLM calls, 0 errors, 113K tokens, $0.159. The row under the date says 2 traces. The conversation is in Agents > Conversations.
 
-The CLI for that process: 9 turns, about 45s, `result.total_cost_usd` $0.135, of which Haiku is $0.000674. `result.usage` output 2,372, uncached input 11, cache read 47,724, cache write 14,141. Five distinct assistant response ids.
-
-- The conversation is in Agents > Conversations.
-- Tool rows are the eight `claude_code.tool` spans, with names and durations. Sentry's `span.duration` matches the native span timestamp to the millisecond: ToolSearch 3.11 ms, `search_sentry_tools` 10.43 ms, `search_issues` 1,006.67 / 1,907.18 / 1,240.96 ms, `execute_sentry_tool` 289.72 / 649.42 ms, `get_sentry_resource` 2,278.66 ms. Those are the CLI's own durations, not the wrapper's stream-arrival gaps. The wrapper clock was not measured on this same process, so there is no call-by-call comparison. `tool.execution` and `tool.blocked_on_user` were left as `claude_code.*` and landed with `span.op=default`. They are not extra tool rows.
-- 6 LLM calls against 5 assistant response ids. The sixth is Haiku (`chat claude-haiku-4-5-20251001`), on its own trace, pulled into the conversation because `session.id` was copied to `gen_ai.conversation.id`. The page's "2 traces" is that split. No duplicate Sonnet response id.
-- Chat attributes sum to 62,455 input tokens and 2,391 output tokens (64,846). The header reads 64K. `gen_ai.cost.total_tokens` on the six chats sums to $0.123. None of those costs is negative or zero. The smallest is the Haiku chat at $0.000741, against the CLI's $0.000674 for Haiku. The invoke span has no cost attribute. The page $0.123 is not `result.total_cost_usd` ($0.135).
-- Of 25 `claude_code.*` logs, 22 share a trace with a chat span. All five Sonnet `api_request` logs share the interaction trace. The Haiku `api_request` log does not share the Haiku span's trace. The two `mcp_server_connection` logs have no span trace.
+- 7 LLM calls against 6 assistant response ids. The seventh is Haiku (`chat claude-haiku-4-5-20251001`), on its own trace, pulled into the conversation because `session.id` was copied to `gen_ai.conversation.id`. The page's "2 traces" is that split.
+- The header's 113K is input plus output on those chats. The page's $0.159 is the 5-minute price in the cost section, not the CLI total.
+- Tool rows are the `claude_code.tool` spans, with names and the CLI's own durations. `tool.execution` and `tool.blocked_on_user` are dropped by `otelcol.customer.yaml`. The experiment config leaves them as `span.op=default`, and they are not extra tool rows.
+- Sonnet `api_request`, tool, and prompt logs share the interaction trace. The Haiku `api_request` log and the MCP connection logs do not.
 - Content flags were unset. The page shows the banner "This conversation's inputs and outputs weren't captured", `<not reported>` on the prompt and assistant rows, and `0 B` on tool rows. `user_prompt` on the span was the literal `<REDACTED>`.
 
 ## Wrapper vs collector
@@ -118,6 +110,6 @@ The CLI for that process: 9 turns, about 45s, `result.total_cost_usd` $0.135, of
 | Cost | `result.total_cost_usd` on `invoke_agent`. The conversation page still prices the chat spans and under-counts output | No cost attribute exists on the spans. On the clean live run the page shows $0.159, which is the 5-minute cache-write price of the span tokens (0.1589268). The CLI and the logs' `cost_usd` are $0.2151071, the 1-hour price. The gap is $2.25/M on 24,969 cache-write tokens. `cost_usd` was not copied onto spans |
 | Haiku | Attribute on `invoke_agent`, not a chat span, so the page does not count it | Own trace, mapped to a `chat` span, same conversation id, so the page counts it. Its log is not on that trace |
 | Log correlation | Wrapper logs are emitted inside the invoke span, so they share its trace | Sonnet `api_request`, tool, and prompt logs share the interaction trace. Haiku's `api_request` and the MCP connection logs do not |
-| Process dies mid-run | Not re-tested here. The wrapper sends a span when it closes; a hard kill drops whatever it has not flushed, and the open invoke span is one of those | Not re-tested by killing `claude`. Export interval is 1s, so a finished span can already have left. The interaction span stays open until the end, so a kill loses it and any unflushed batch. A 401 from Sentry is permanent: the exporter dropped those batches |
+| Process dies mid-run | Not re-tested here. The wrapper sends a span when it closes; a hard kill drops whatever it has not flushed, and the open invoke span is one of those | Not re-tested by killing `claude`. Export interval is 1s, so a finished span can already have left. The interaction span stays open until the end, so a kill loses it and any unflushed batch. This config does not retry a batch Sentry rejects |
 | What Sentry cannot ingest | OTLP metrics. This run set `OTEL_METRICS_EXPORTER=none` and did not send a metrics payload | Same. Direct OTLP docs cover traces and logs. Span events are dropped, which does not matter here: the native spans put tokens on attributes, not span events |
 | Fragile | The stream-json event shape | Span names and `span.type` come from Claude Code 2.1.177 with the enhanced telemetry beta flag. A later CLI can rename `claude_code.llm_request` or stop putting `input_tokens` on the span. The beta flag is still named beta |

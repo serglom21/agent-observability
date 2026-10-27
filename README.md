@@ -1,12 +1,100 @@
-A simulated metric alert starts a headless Claude Code session. This process records that session as Sentry `gen_ai` spans. The alert is not registered with Sentry. Nothing here receives a real alert unless you POST one yourself.
+A simulated metric alert starts a headless Claude Code session. This demo does not claim the diagnosis is correct. The agent reads whatever organization and project you set, and there is no baked-in answer.
 
-The agent reads whatever organization and project you set. `SENTRY_ORG` and `SENTRY_PROJECT` go into the prompt, and a posted alert can name a different project. There is no baked-in answer. This demo does not claim the diagnosis is correct.
+Two ways to get that session into Sentry's Agents > Conversations view. Option A is the one to copy.
 
-Native Claude telemetry stays off. Conversations fills in from this wrapper.
+## Option A: collector (recommended)
 
-Tool and chat durations are the gaps between `stream-json` events arriving here. They are tagged `timing=approximate_stream_arrival`. That clock is not `claude_code.tool.execution`. There is one `gen_ai.chat` per assistant response id. A tool result does not close it. It closes when a different id arrives, or at `result`. The first chat opens before the CLI starts, so it includes CLI and MCP startup. The conversation picture is the run described in this section. The waterfall picture is an earlier content-off run. The timings are approximate.
+An OpenTelemetry Collector sits between Claude Code and Sentry. Claude's own telemetry stays in its process. The collector renames `claude_code.interaction`, `claude_code.llm_request`, and `claude_code.tool` into the `gen_ai` spans Conversations renders. Nothing in the agent loop imports `tracing.py`.
 
-## Quickstart
+The config to run is `collector/otelcol.customer.yaml`. It does not write a file. It drops the `tool.execution` and `tool.blocked_on_user` child spans, fills a missing cache count with 0, and deletes the user and organization attributes. `collector/otelcol.yaml` is the experiment config: same mapping, plus a file exporter and a prompt mapping. Tested with Claude Code 2.1.177 and `otelcol-contrib` 0.163.2.
+
+### Quickstart
+
+1. Get the collector binary. This machine used the darwin arm64 0.163.2 release. The tarball's sha256 is `ae0dff18926bc3f1e3ef4d1633c4ad4326781f302da2ba5be2ce215ba86e4b9e`. Do not commit the binary.
+
+   ```bash
+   curl -fsSL -o /tmp/otelcol-contrib.tar.gz \
+     https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.163.2/otelcol-contrib_0.163.2_darwin_arm64.tar.gz
+   shasum -a 256 /tmp/otelcol-contrib.tar.gz
+   mkdir -p /tmp/df-collector && tar -xzf /tmp/otelcol-contrib.tar.gz -C /tmp/df-collector
+   ```
+
+   On another OS, use that platform's `otelcol-contrib` 0.163.2 asset from the same release, and check its `.sha256`.
+
+2. Put the endpoints and the public DSN key in the environment. `AGENT_NAME` is required. The YAML adds the `sentry sentry_key=` prefix, so the variable is the key alone. Single-quote it. An unquoted `sentry sentry_key=...` value is truncated by the shell to the word `sentry`, and Sentry returns 401.
+
+   The endpoint host and project id are the ones in your DSN. A DSN `https://KEY@oORG.ingest.REGION.sentry.io/PROJECT` uses `https://oORG.ingest.REGION.sentry.io/api/PROJECT/integration/otlp/v1/traces` and the same URL with `/logs`.
+
+   ```bash
+   export AGENT_NAME=dictation-fixer
+   export SENTRY_OTLP_KEY='your-public-dsn-key'
+   export SENTRY_OTLP_TRACES_ENDPOINT='https://oORG.ingest.REGION.sentry.io/api/PROJECT/integration/otlp/v1/traces'
+   export SENTRY_OTLP_LOGS_ENDPOINT='https://oORG.ingest.REGION.sentry.io/api/PROJECT/integration/otlp/v1/logs'
+   ```
+
+   If `AGENT_NAME` is unset, the span name is the literal `AGENT_NAME is unset`.
+
+3. Start the collector and leave it running:
+
+   ```bash
+   /tmp/df-collector/otelcol-contrib --config collector/otelcol.customer.yaml
+   ```
+
+   The tarball extracts the binary at the top of that directory. It listens on `127.0.0.1:4318`.
+
+4. From the repo root, fill the prompt env and log Claude in once under this repo's config dir. A login in `~/.claude` is not visible here. `agent-home/` is gitignored. `claude auth login` is interactive; a fresh clone stops here until it finishes. If `run_native.py` then prints `is_error True` and the stream says `Not logged in · Please run /login`, that login was not done for `./agent-home`.
+
+   ```bash
+   cp .env.example .env
+   # fill SENTRY_DSN, SENTRY_ORG, SENTRY_PROJECT, SENTRY_ACCESS_TOKEN
+   CLAUDE_CONFIG_DIR=./agent-home claude auth login
+   ```
+
+   `collector/run_native.py` is the demo runner. It reads `.env`, sets the variables below, uses `./agent-home`, and does not import `tracing.py`. The collector itself does not read the DSN.
+
+   ```bash
+   export CLAUDE_CODE_ENABLE_TELEMETRY=1
+   export CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1
+   export OTEL_TRACES_EXPORTER=otlp
+   export OTEL_LOGS_EXPORTER=otlp
+   export OTEL_METRICS_EXPORTER=none
+   export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+   export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+   export OTEL_TRACES_EXPORT_INTERVAL=1000
+   export OTEL_LOGS_EXPORT_INTERVAL=1000
+   python3 collector/run_native.py
+   ```
+
+   Leave `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, and `OTEL_LOG_TOOL_CONTENT` unset unless you want the log attributes in the next section. `run_native.py --content` sets all three.
+
+5. In Sentry, open the project you exported to and go to Agents > Conversations. The new row is the agent name from `AGENT_NAME`. Give the index half a minute.
+
+![Clean live collector run. The header shows 7 LLM calls, 0 errors, 113K tokens, and $0.159.](screenshots/collector-conversation.png)
+
+### What you see, and what you don't
+
+The transcript is metadata. Names, durations, token counts, and Sentry's price are on the page. The prompt and the assistant text stay `<not reported>`. Tool rows stay `0 B`. The banner says the inputs and outputs weren't captured. That is the content-off run in the picture: 7 LLM calls, 0 errors, 113K, $0.159, two traces. The second trace is Haiku. It shares the conversation id, so the page counts it.
+
+Tool arguments are not on those spans. With `OTEL_LOG_TOOL_DETAILS=1` and `OTEL_LOG_TOOL_CONTENT=1`, the argument JSON is on the logs for that same trace: `tool_parameters` on `claude_code.tool_decision`, and `tool_parameters` plus `tool_input` on `claude_code.tool_result`. The conversation page still does not render them. Open Explore > Logs, filter to that trace, and read the log attributes. There is no tool-result body and no assistant text in the logs either. The 7-call picture above was captured with the content flags unset, so its logs do not have that JSON. The content-on run is a different process.
+
+### Cost
+
+The $0.159 on the conversation page is Sentry's price of the span token attributes at the 5-minute cache-write rate ($3.75 per million). The real cost is the CLI's `result.total_cost_usd`, which matches `cost_usd` on the `claude_code.api_request` logs. On this run that is $0.215. The gap is the 1-hour cache-write rate ($6 per million) the CLI uses. The page does not show that number. Read the CLI total, or sum `cost_usd` on the logs.
+
+### Canary
+
+`collector/canary.py` checks that a capture still has `span.type=interaction`, `span.type=llm_request`, and the four token attributes (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`). A Claude Code upgrade that renames them fails the script. It was run against Claude Code 2.1.177 and `otelcol-contrib` 0.163.2.
+
+```bash
+python3 collector/canary.py --capture DIR    # DIR/traces.json from the file exporter
+python3 collector/canary.py --live
+```
+
+`--live` needs port 4318 free and a Claude login in `./agent-home`. It runs one trivial `claude -p` prompt through `collector/baseline.yaml` and does not export to Sentry. Set `OTELCOL` if the binary is not the path from step 1.
+
+## Option B: wrapper (`tracing.py`)
+
+Use this when the conversation page has to show the prompt, the tool arguments, and the tool results. `tracing.py` (471 lines) reads `claude`'s `stream-json` and emits `gen_ai.invoke_agent`, `gen_ai.chat`, and `gen_ai.execute_tool` through `sentry-sdk` 2.68.1. Native Claude telemetry is off in this path, so the same work is not recorded twice.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -16,102 +104,14 @@ CLAUDE_CONFIG_DIR=./agent-home claude auth login
 .venv/bin/python run.py
 ```
 
-`python run.py` is the one-shot. It reads `.env`, uses `./agent-home` plus only `mcp.json`, and prints the session id and trace id. It does not query Sentry back.
+Leave `DICTATION_FIXER_CAPTURE_CONTENT` unset and the page shows names, durations, and tokens, with `<not reported>` bodies. Set it to `1` and the transcript carries the prompt, tool arguments, and tool results. The data scrubber on the dictation-fixer project did not remove file paths or organization slugs. Do not turn this on against a project whose scrubbing you have not checked.
 
-Log in once with `CLAUDE_CONFIG_DIR` pointed at `./agent-home`. A login stored in `~/.claude` is not visible here. `agent-home/` is gitignored.
+![Content-on wrapper transcript. The header shows 5 LLM calls, 0 errors, 68K tokens, and $0.0809.](screenshots/conversation.png)
 
-To start the same run from a simulated alert:
+That picture is one content-on run: 5 LLM calls, 0 errors, 68K, $0.0809. The 68K and $0.0809 are the stream's per-message counts. `result.usage` output on that run was 2,135, and the CLI total was $0.152. The page under-counts because the chat spans carry the stream's output count. The exact total is on `gen_ai.invoke_agent`. Haiku is an attribute on that span, not its own chat, so the page does not count it.
 
-```bash
-.venv/bin/python webhook.py
-```
+![Wrapper waterfall from an earlier content-off run. The first chat includes CLI and MCP startup.](screenshots/trace.png)
 
-```bash
-curl -X POST http://127.0.0.1:8787/metric-alert \
-  -H 'content-type: application/json' \
-  -d '{"action":"critical","data":{"metric_alert":{"projects":["your-project"],"alert_rule":{"name":"Simulated dictation failure rate"}}}}'
-```
+Durations in the wrapper are gaps between `stream-json` events (`timing=approximate_stream_arrival`), not the CLI's own span timestamps. `webhook.py` starts the same runner from a POST to `127.0.0.1:8787/metric-alert`. See the script for the signature check.
 
-`webhook.py` listens on `127.0.0.1` and port `8787` (`PORT` overrides it). A body without `data.metric_alert` gets HTTP 400. A valid body gets HTTP 202 and a `run_id` immediately. The Claude session runs on a background thread.
-
-`projects[0]` and `alert_rule.name` are the only payload fields copied into the prompt, and each is clipped (100 and 200 characters). The rest of the body is not inserted. If `projects[0]` is missing, the prompt uses `SENTRY_PROJECT`.
-
-If `SENTRY_WEBHOOK_SECRET` is set, the request must send `Sentry-Hook-Signature`, the HMAC-SHA256 hex digest of the raw body (a `sha256=` prefix is accepted). A missing or wrong signature is HTTP 401. If the variable is unset, signatures are not checked.
-
-## What the page shows
-
-Content on. Approximate stream-arrival timing. Five assistant response ids, five `gen_ai.chat` spans, no duplicate id. The page's LLM call count is 5, the same as those ids. Haiku ran once and is not a span, so the page does not count it. Five ids plus Haiku is 6 model calls.
-
-![Conversation transcript with content capture on. The header shows 5 LLM calls, 0 errors, 68K tokens, and $0.0809. The crop stops above the final answer.](screenshots/conversation.png)
-
-The transcript starts with the first assistant message, then `ToolSearch` and the Sentry MCP tools with their arguments, sizes, durations, and costs. The alert text is stored on `gen_ai.invoke_agent` as `gen_ai.input.messages`. This conversation page does not render that user message, so the picture starts at the assistant's first line. The crop stops above the final answer. That answer said a recent release caused the alert. The other runs on this prompt said the same thing, and this demo does not claim that is correct, so the answer is not in the picture. This picture shows 5 LLM calls, 0 errors, 68K tokens, and $0.0809. The 68K is the sum of the stream's per-message usage. Those five chats report 25 output tokens in all. `result.usage` output is 2,135, and that exact total is on `gen_ai.invoke_agent`, so the conversation summary under-counts output. Haiku is not a chat span, so the page does not count it. The CLI reported $0.152 for this run (8 turns, about 42s).
-
-With content capture left off, the same page shows names, durations, and tokens, and the prompts and results read `<not reported>`.
-
-![Approximate waterfall through the last chat. The 0.06ms parent is the segment closed so the trace can be listed. The first chat includes CLI and MCP startup.](screenshots/trace.png)
-
-Earlier content-off run, the whole tree, through the 17.79s chat. The top row, `gen_ai.invoke_agent` named `dictation-fixer`, is **0.06ms**. That span is closed before `claude` starts so Sentry will list the trace while `invoke_agent` is still open. It is not a model call. The long bar under it is `invoke_agent` (45.58s). The first `gen_ai.chat` is 4.46s and starts when the wrapper opens it, before the CLI and MCP are up, so that bar includes startup. Later chats stay open for the rest of the same response id, including across a tool result.
-
-## Env vars
-
-| Variable | What it does |
-|---|---|
-| `SENTRY_DSN` | Where the wrapper sends spans and logs. |
-| `SENTRY_ORG` | Organization the prompt names. |
-| `SENTRY_PROJECT` | Project the prompt names, unless the posted alert names one. The agent reads that project's telemetry through the MCP. |
-| `SENTRY_ACCESS_TOKEN` | Token for the Sentry MCP server. Not the DSN. |
-| `CLAUDE_MODEL` | Optional. Default `sonnet`. |
-| `DICTATION_FIXER_CAPTURE_CONTENT` | Default off. Set to `1` to attach the prompt, the final answer, tool arguments, and tool results. |
-| `DICTATION_FIXER_MAX_TURNS` | Optional. Passed to `--max-turns` when the webhook starts the run. Default 20. |
-| `SENTRY_WEBHOOK_SECRET` | Optional. If set, `webhook.py` requires `Sentry-Hook-Signature`. |
-| `PORT` | Webhook port. Default 8787. |
-
-`python run.py --max-turns N` passes the CLI flag `--max-turns`. It does not set a `maxTurns` settings key.
-
-`run.py` also sets `CLAUDE_CONFIG_DIR` to `./agent-home`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and turns Claude's own OTEL exporters off.
-
-## Content capture
-
-Leave `DICTATION_FIXER_CAPTURE_CONTENT` unset. Spans then carry names, durations, and token counts. The same page shows names, durations, and tokens, and the prompts and results read `<not reported>`. A tool row that shows **0 B** means that body was not stored. It does not mean the tool returned an empty result.
-
-Setting it to `1` sends message and tool bodies. On the dictation-fixer project the data scrubber is on, with default scrubbers, and it still did not remove file paths or organization slugs. Do not turn this on against a project whose scrubbing you have not checked.
-
-## What to change in your own loop
-
-Keep the alert text your webhook already builds. Replace the body of `alert_prompt()` with that text. Keep the length limit if any of that text comes from the webhook body.
-
-Spans are opened while `claude` is still running:
-
-- A short segment span is closed immediately, then `gen_ai.invoke_agent` starts as its child.
-- `system` / `init` `session_id` becomes `gen_ai.conversation.id`.
-- The first `gen_ai.chat` opens before the process, so it includes CLI and MCP startup. One chat per assistant response id. A `tool_result` does not close it. A different id does, and so does `result`. A reused response id is logged. It does not stop the agent.
-- A later chat has to start at the previous event. `sentry-sdk` 2.68.1 `traces.start_span()` has no `start_timestamp` argument, and `StreamedSpan.start_timestamp` is read-only. The older `Span` constructor accepts `start_timestamp`, but that API does not emit streamed spans when `trace_lifecycle="stream"`. The mapper sets `_start_timestamp` for that reason.
-- `tool_use` opens `gen_ai.execute_tool`. The matching `tool_result` closes it.
-- `result.usage` and `result.total_cost_usd` go on `gen_ai.invoke_agent`.
-- Other models in `result.modelUsage` (Haiku) are attributes on that same span, `gen_ai.side_model.*`, with `timing=not_in_stream`. They are not their own chat span. The call is not in the stream, so a span for it would be 0ms.
-
-`tracing.py` is the stream-json to `gen_ai` mapping (471 lines). `run.py` is the runner. `webhook.py` accepts the simulated alert. A telemetry failure is logged and does not stop the agent.
-
-Logs use `sentry-sdk` with `enable_logs`. Inside the open invoke span the wrapper logs the run start, each tool failure, and a run summary. Those logs carry the same `trace_id`.
-
-Point `mcp.json` at your MCP server. The runner passes `--strict-mcp-config` and `--setting-sources ""`, and the only built-in tool is `ToolSearch`.
-
-## Native telemetry vs this wrapper
-
-Claude can export `claude_code.interaction`, `claude_code.llm_request`, and `claude_code.tool` over OTLP. Sentry stores those spans with `span.op=default`. They do not set `gen_ai.operation.name` or `gen_ai.conversation.id`, so Conversations stays empty. A parent `invoke_agent` span plus `TRACEPARENT` nests the native tree in one trace, and Conversations still shows only the parent.
-
-This wrapper emits `gen_ai.invoke_agent`, `gen_ai.chat`, and `gen_ai.execute_tool` through `sentry-sdk` 2.68.1 with `trace_lifecycle="stream"`. Native export is off, so the same work is not recorded twice and the standalone Haiku trace does not appear. Haiku's tokens from `result.modelUsage` are attributes on `invoke_agent`. This run did call Haiku. Its duration was not measured, and the conversation page does not count it as an LLM call.
-
-`timing=approximate_stream_arrival` means the duration is how long this process waited between stream events.
-
-## What Sentry cannot ingest
-
-Sentry's OTLP endpoint accepts traces and logs. `POST .../v1/metrics` returns 404. Claude's `claude_code.cost.usage`, `claude_code.token.usage`, `claude_code.session.count`, and `claude_code.active_time.total` metrics have nowhere to go. Cost on these spans is Sentry's price for the token attributes, not those metrics.
-
-## Token attributes
-
-The CLI's `input_tokens` is the uncached count. Sentry prices `(input - cache read - cache write)` at the input rate, then adds cache read and cache write at their own rates. Copying the uncached count across next to those cache fields makes the cost negative. `usage_attributes()` sets `gen_ai.usage.input_tokens` to uncached + cache read + cache write. The alias fields are the same counts as `gen_ai.usage.cache_read.input_tokens` and `gen_ai.usage.cache_creation.input_tokens`. A one-trace check priced both layouts the same.
-
-Sentry's cost is an estimate. For `claude-sonnet-4-6` it prices cache writes at the 5-minute rate, $3.75 per million tokens. These runs write a 1-hour cache (`ephemeral_1h`), which the CLI prices at $6 per million. Sentry can therefore under-report. On this run its price of the Sonnet tokens was $0.113 and `result.total_cost_usd` was $0.152. The real figure is `result.total_cost_usd` on the `gen_ai.invoke_agent` span (`gen_ai.usage.total_cost_usd`). The conversation summary sums the chat spans. It is not that figure. The page shows $0.0809 because those spans carry the stream's output count, 25 tokens, not the 2,135 on `result.usage`. A row that reads `<$0.01` is a positive cost under one cent. Haiku is not a chat span, so its cost is not in the summary.
-
-Chat spans keep the output count from the stream. Several messages report 1 output token. On this run the five chats summed to 25 output tokens, and `result.usage` output was 2,135. That exact total is on `invoke_agent` only. Sonnet input on the chats matches `result.usage` (68,833, of which 51,484 are cache read and 17,338 are cache write). Haiku is 579 input and 19 output, on `gen_ai.side_model.*`, outside `result.usage`.
+Sentry's OTLP intake accepts traces and logs. Metrics return 404, on both options. Cost on the page is Sentry's price for the token attributes, not Claude's cost metrics.
